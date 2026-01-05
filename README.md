@@ -15,14 +15,18 @@ Idris2 (.idr) → RefC backend → C code → Emscripten → WASM
 | Idris2 → C | ✅ Working | RefC backend generates C code |
 | C → Native | ✅ Working | Output: "Hello from Idris2 WASM!" |
 | C → WASM (hello) | ⚠️ Compiles | emscripten 3.1.6 has output issues |
-| C → WASM (canister) | ✅ Working | Produces IC-compatible canister.wasm |
+| C → WASM (canister) | ⚠️ Compiles | WASI imports block IC deployment |
 
-**Known Issue**: Ubuntu's emscripten 3.1.6 has compatibility issues with the Idris2 RefC runtime for the hello example. Recommended: Install latest emscripten via [emsdk](https://emscripten.org/docs/getting_started/downloads.html).
+**Known Issues**:
+- Ubuntu's emscripten 3.1.6 has compatibility issues with Idris2 RefC runtime
+- Canister WASM includes WASI/env imports (`fd_write`, `abort`, etc.) that IC doesn't support
+- Recommend using latest emscripten via [emsdk](https://emscripten.org/docs/getting_started/downloads.html)
 
 ## Prerequisites
 
 - [Idris2](https://github.com/idris-lang/Idris2) with RefC backend
 - [Emscripten](https://emscripten.org/) (recommend latest via emsdk)
+- [dfx](https://internetcomputer.org/docs/current/developer-docs/setup/install) (for IC deployment)
 
 ## Quick Start
 
@@ -54,6 +58,8 @@ idris2-wasm/
 │   └── ic0/
 │       ├── ic0.h           # IC0 system API declarations
 │       └── canister_entry.c # Canister entry point wrappers
+├── dfx.json                # dfx project config
+├── canister.did            # Candid interface
 ├── build/                  # Generated output (gitignored)
 └── README.md
 ```
@@ -72,12 +78,31 @@ The canister build produces standalone WASM with:
 - `ic0.msg_reply` - Send reply
 - `ic0.msg_reply_data_append` - Append data to reply
 
+**Known Issue:** Emscripten 3.1.6 also adds WASI imports (`wasi_snapshot_preview1.*`) and env imports (`env.abort`, `env.emscripten_*`) that the IC doesn't support. These need to be stubbed or removed for IC deployment.
+
 ```bash
 # Build canister
 ./scripts/build-canister.sh
 
 # Inspect WASM structure
 wasm-objdump -x build/canister/canister.wasm
+
+# Inspect with ic-wasm
+ic-wasm build/canister/canister.wasm info
+```
+
+## Deploying to IC (WIP)
+
+```bash
+# Start local replica
+dfx start --background
+
+# Deploy (currently fails due to WASI imports)
+dfx deploy idris2_canister
+
+# Call canister methods (after successful deployment)
+dfx canister call idris2_canister greet
+dfx canister call idris2_canister ping
 ```
 
 ## How It Works
@@ -110,4 +135,6 @@ gcc build/hello/exec/main.c \
 
 - [x] Pure Idris2 → WASM pipeline
 - [x] IC0 canister imports for ICP
-- [ ] dfx deployment support
+- [x] dfx project configuration
+- [ ] Remove WASI/env imports for IC compatibility
+- [ ] Full dfx deployment support

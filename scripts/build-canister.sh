@@ -76,23 +76,32 @@ if [ ! -f "$REFC_SRC/runtime.c" ]; then
     done
 fi
 
-REFC_C_FILES="$REFC_SRC/runtime.c $REFC_SRC/memoryManagement.c $REFC_SRC/stringOps.c $REFC_SRC/mathFunctions.c $REFC_SRC/casts.c $REFC_SRC/prim.c $REFC_SRC/idris_support.c $REFC_SRC/idris_file.c $REFC_SRC/refc_util.c $REFC_SRC/idris_util.c"
+# Minimal RefC files for canister (no file I/O to avoid WASI)
+REFC_C_FILES="$REFC_SRC/runtime.c $REFC_SRC/memoryManagement.c $REFC_SRC/stringOps.c $REFC_SRC/mathFunctions.c $REFC_SRC/casts.c $REFC_SRC/prim.c $REFC_SRC/refc_util.c"
 
 echo ">>> Step 3: Compile to standalone WASM (Emscripten)"
 
 # Build standalone WASM using emscripten
 # STANDALONE_WASM produces a .wasm file that can run without JS glue
+# PURE_WASI=0 and FILESYSTEM=0 to avoid WASI imports that IC doesn't support
+# First build to JS/WASM bundle (avoids WASI completely)
 emcc "$C_FILE" $REFC_C_FILES "$MINI_GMP/mini-gmp.c" "$IC0_SUPPORT/canister_entry.c" \
     -I"$REFC_SUPPORT" \
     -I"$C_SUPPORT" \
     -I"$MINI_GMP" \
     -I"$IC0_SUPPORT" \
-    -o "$BUILD_DIR/canister.wasm" \
-    -s STANDALONE_WASM=1 \
+    -o "$BUILD_DIR/canister_temp.js" \
+    -s WASM=1 \
+    -s MODULARIZE=0 \
+    -s FILESYSTEM=0 \
     -s EXPORTED_FUNCTIONS='["_canister_init","_canister_query_greet","_canister_update_ping"]' \
     -s ERROR_ON_UNDEFINED_SYMBOLS=0 \
     --no-entry \
     -O2
+
+# Extract just the WASM, rename it
+mv "$BUILD_DIR/canister_temp.wasm" "$BUILD_DIR/canister.wasm"
+rm -f "$BUILD_DIR/canister_temp.js"
 
 echo ">>> Done!"
 echo "Output: $BUILD_DIR/canister.wasm"
