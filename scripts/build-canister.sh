@@ -7,6 +7,12 @@ set -e
 export PATH="$HOME/.local/bin:$PATH"
 export IDRIS2_PREFIX="$HOME/.local"
 
+# Use emsdk if available
+if [ -f "$HOME/emsdk/emsdk_env.sh" ]; then
+    source "$HOME/emsdk/emsdk_env.sh" > /dev/null 2>&1
+    echo "Using emsdk: $(emcc --version | head -1)"
+fi
+
 EXAMPLE="${1:-canister}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -90,18 +96,12 @@ emcc "$C_FILE" $REFC_C_FILES "$MINI_GMP/mini-gmp.c" "$IC0_SUPPORT/canister_entry
     -I"$C_SUPPORT" \
     -I"$MINI_GMP" \
     -I"$IC0_SUPPORT" \
-    -o "$BUILD_DIR/canister_temp.js" \
-    -s WASM=1 \
-    -s MODULARIZE=0 \
+    -o "$BUILD_DIR/canister.wasm" \
+    -s STANDALONE_WASM=1 \
     -s FILESYSTEM=0 \
-    -s EXPORTED_FUNCTIONS='["_canister_init","_canister_query_greet","_canister_update_ping"]' \
     -s ERROR_ON_UNDEFINED_SYMBOLS=0 \
     --no-entry \
     -O2
-
-# Extract just the WASM, rename it
-mv "$BUILD_DIR/canister_temp.wasm" "$BUILD_DIR/canister.wasm"
-rm -f "$BUILD_DIR/canister_temp.js"
 
 echo ">>> Done!"
 echo "Output: $BUILD_DIR/canister.wasm"

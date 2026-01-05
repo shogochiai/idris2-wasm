@@ -5,7 +5,7 @@ Idris2 to WebAssembly compilation pipeline via RefC backend + Emscripten.
 ## Pipeline
 
 ```
-Idris2 (.idr) → RefC backend → C code → Emscripten → WASM
+Idris2 (.idr) → RefC backend → C code → Emscripten → WASM → WASI stub → IC Deploy
 ```
 
 ## Status
@@ -14,34 +14,38 @@ Idris2 (.idr) → RefC backend → C code → Emscripten → WASM
 |------|--------|-------|
 | Idris2 → C | ✅ Working | RefC backend generates C code |
 | C → Native | ✅ Working | Output: "Hello from Idris2 WASM!" |
-| C → WASM (hello) | ⚠️ Compiles | emscripten 3.1.6 has output issues |
-| C → WASM (canister) | ⚠️ Compiles | WASI imports block IC deployment |
-
-**Known Issues**:
-- Ubuntu's emscripten 3.1.6 has compatibility issues with Idris2 RefC runtime
-- Canister WASM includes WASI/env imports (`fd_write`, `abort`, etc.) that IC doesn't support
-- Recommend using latest emscripten via [emsdk](https://emscripten.org/docs/getting_started/downloads.html)
+| C → WASM | ✅ Working | emsdk 4.0.22 + STANDALONE_WASM |
+| WASI stubbing | ✅ Working | tools/stub-wasi.sh removes WASI imports |
+| IC deployment | ✅ Working | Canister deployed and responding |
 
 ## Prerequisites
 
 - [Idris2](https://github.com/idris-lang/Idris2) with RefC backend
-- [Emscripten](https://emscripten.org/) (recommend latest via emsdk)
+- [Emscripten](https://emscripten.org/) via emsdk (4.0.22+)
 - [dfx](https://internetcomputer.org/docs/current/developer-docs/setup/install) (for IC deployment)
+- [wabt](https://github.com/WebAssembly/wabt) (for WASI stubbing)
 
 ## Quick Start
 
-### Hello World (WASM for Node.js)
+### ICP Canister Deployment
 
 ```bash
-./scripts/build-wasm.sh hello
-node build/hello/main.js
-```
-
-### ICP Canister (Standalone WASM)
-
-```bash
+# 1. Build canister WASM
 ./scripts/build-canister.sh
-# Output: build/canister/canister.wasm (22KB)
+
+# 2. Stub WASI imports (required for IC)
+./tools/stub-wasi.sh build/canister/canister.wasm build/canister/canister_stubbed.wasm
+
+# 3. Deploy to local IC
+dfx start --background
+dfx deploy idris2_canister
+
+# 4. Call methods
+dfx canister call idris2_canister greet
+# Returns: "Hello from Idris2 on IC!" (raw bytes)
+
+dfx canister call idris2_canister ping
+# Returns: "pong" (raw bytes)
 ```
 
 ## Project Structure
@@ -49,92 +53,85 @@ node build/hello/main.js
 ```
 idris2-wasm/
 ├── examples/
-│   ├── hello/Main.idr      # Hello World example
-│   └── canister/Main.idr   # ICP canister example
+│   ├── hello/Main.idr        # Hello World example
+│   └── canister/Main.idr     # ICP canister example
 ├── scripts/
-│   ├── build-wasm.sh       # Build WASM for Node.js
-│   └── build-canister.sh   # Build WASM for ICP canisters
+│   ├── build-wasm.sh         # Build WASM for Node.js
+│   └── build-canister.sh     # Build WASM for ICP canisters
+├── tools/
+│   └── stub-wasi.sh          # WASI import stubber
 ├── support/
 │   └── ic0/
-│       ├── ic0.h           # IC0 system API declarations
-│       └── canister_entry.c # Canister entry point wrappers
-├── dfx.json                # dfx project config
-├── canister.did            # Candid interface
-├── build/                  # Generated output (gitignored)
-└── README.md
+│       ├── ic0.h             # IC0 system API declarations
+│       └── canister_entry.c  # Canister entry point wrappers
+├── docs/
+│   └── research-blockers.md  # Research notes on WASI blockers
+├── dfx.json                  # dfx project config
+├── canister.did              # Candid interface
+└── build/                    # Generated output (gitignored)
 ```
 
 ## ICP Canister Build
 
 The canister build produces standalone WASM with:
 
-**Exports:**
+**Exports (IC convention with spaces):**
 - `canister_init` - Called on canister initialization
-- `canister_query_greet` - Query method
-- `canister_update_ping` - Update method
+- `canister_query greet` - Query method (note: space not underscore)
+- `canister_update ping` - Update method
 
 **Imports (from IC runtime):**
 - `ic0.debug_print` - Debug logging
 - `ic0.msg_reply` - Send reply
 - `ic0.msg_reply_data_append` - Append data to reply
 
-**Known Issue:** Emscripten 3.1.6 also adds WASI imports (`wasi_snapshot_preview1.*`) and env imports (`env.abort`, `env.emscripten_*`) that the IC doesn't support. These need to be stubbed or removed for IC deployment.
-
+**Build flags:**
 ```bash
-# Build canister
-./scripts/build-canister.sh
-
-# Inspect WASM structure
-wasm-objdump -x build/canister/canister.wasm
-
-# Inspect with ic-wasm
-ic-wasm build/canister/canister.wasm info
+emcc ... -s STANDALONE_WASM=1 -s FILESYSTEM=0 -s ERROR_ON_UNDEFINED_SYMBOLS=0
 ```
 
-## Deploying to IC (WIP)
+## WASI Stubbing
 
-```bash
-# Start local replica
-dfx start --background
+Emscripten produces WASM with WASI imports that IC doesn't support:
+- `wasi_snapshot_preview1.fd_close`
+- `wasi_snapshot_preview1.fd_write`
+- `wasi_snapshot_preview1.fd_seek`
 
-# Deploy (currently fails due to WASI imports)
-dfx deploy idris2_canister
+The `tools/stub-wasi.sh` script:
+1. Converts WASM to WAT (text format)
+2. Replaces WASI imports with stub functions returning 0
+3. Converts back to WASM
 
-# Call canister methods (after successful deployment)
-dfx canister call idris2_canister greet
-dfx canister call idris2_canister ping
-```
+Result: Clean WASM with only `ic0.*` imports.
 
 ## How It Works
 
 1. **Idris2 → C**: Uses `--codegen refc` to generate C code
-2. **C → WASM**: Emscripten compiles C with:
+2. **C → WASM**: Emscripten compiles with:
+   - `STANDALONE_WASM=1` for pure WASM output
    - RefC runtime sources (downloaded from Idris2 repo)
    - mini-gmp for arbitrary precision integers
-   - IC0 entry points for canister interface
+   - IC0 entry points with `export_name` attributes
+3. **WASI stubbing**: Replace unsupported imports with stubs
+4. **IC deploy**: Deploy to local or mainnet IC
 
 ## Dependencies Downloaded Automatically
 
 - `mini-gmp.c/h` - Minimal GMP implementation for WASM
 - RefC runtime sources from Idris2 repository
 
-## Native Build (for testing)
-
-```bash
-gcc build/hello/exec/main.c \
-    /tmp/refc-src/*.c \
-    -I$IDRIS2_PREFIX/idris2-*/support/refc \
-    -I$IDRIS2_PREFIX/idris2-*/support/c \
-    -lgmp -o main_native
-
-./main_native
-# Output: Hello from Idris2 WASM!
-```
-
 ## Roadmap
 
 - [x] Pure Idris2 → WASM pipeline
 - [x] IC0 canister imports for ICP
 - [x] dfx project configuration
-- [ ] Remove WASI/env imports for IC compatibility
-- [ ] Full dfx deployment support
+- [x] WASI import stubbing
+- [x] IC deployment support
+- [ ] Candid encoding for proper dfx integration
+- [ ] Mainnet deployment
+
+## Known Limitations
+
+- Returns raw bytes instead of Candid-encoded data (dfx shows hex)
+- Requires manual WASI stubbing step (not integrated into build yet)
+- Limited IC0 API surface (msg_reply, debug_print)
