@@ -45,11 +45,15 @@ wasi_imports = {}  # func_idx -> (name, type_idx)
 
 # First pass: identify WASI imports and their types
 for i, line in enumerate(lines):
-    # Match: (import "wasi_snapshot_preview1" "fd_close" (func (;3;) (type 0)))
-    m = re.match(r'\s*\(import "wasi_snapshot_preview1" "(\w+)" \(func \(;(\d+);\) \(type (\d+)\)\)\)', line)
+    # Match both formats:
+    #   (import "wasi_snapshot_preview1" "fd_close" (func (;3;) (type 0)))
+    #   (import "wasi_snapshot_preview1" "fd_close" (func $__wasi_fd_close (type 0)))
+    m = re.match(r'\s*\(import "wasi_snapshot_preview1" "(\w+)" \(func (?:\(;(\d+);\)|\$(\w+)) \(type (\d+)\)\)\)', line)
     if m:
-        name, func_idx, type_idx = m.groups()
-        wasi_imports[int(func_idx)] = (name, int(type_idx))
+        name = m.group(1)
+        func_idx = m.group(2) if m.group(2) else m.group(3)  # numeric or named
+        type_idx = m.group(4)
+        wasi_imports[func_idx] = (name, int(type_idx))
         print(f"  Found WASI import: {name} (func {func_idx}, type {type_idx})", file=sys.stderr)
 
 if not wasi_imports:
@@ -90,17 +94,22 @@ def make_stub_body(type_sig):
 
 # Second pass: transform the WAT
 for line in lines:
-    # Check if this is a WASI import to replace
-    m = re.match(r'(\s*)\(import "wasi_snapshot_preview1" "(\w+)" \(func \(;(\d+);\) \(type (\d+)\)\)\)', line)
+    # Check if this is a WASI import to replace - handle both numeric and named formats
+    m = re.match(r'(\s*)\(import "wasi_snapshot_preview1" "(\w+)" \(func (?:\(;(\d+);\)|\$(\w+)) \(type (\d+)\)\)\)', line)
     if m:
-        indent, name, func_idx, type_idx = m.groups()
-        type_idx = int(type_idx)
+        indent = m.group(1)
+        name = m.group(2)
+        func_idx_num = m.group(3)  # numeric index like (;3;)
+        func_idx_name = m.group(4)  # named like $__wasi_fd_close
+        type_idx = int(m.group(5))
         type_sig = type_defs.get(type_idx, '')
         stub_body = make_stub_body(type_sig)
 
-        # Generate stub function
-        # Format: (func (;3;) (type 0) <body>)
-        new_line = f'{indent}(func (;{func_idx};) (type {type_idx}) {stub_body})'
+        # Generate stub function - preserve the original function identifier format
+        if func_idx_num:
+            new_line = f'{indent}(func (;{func_idx_num};) (type {type_idx}) {stub_body})'
+        else:
+            new_line = f'{indent}(func ${func_idx_name} (type {type_idx}) {stub_body})'
         new_lines.append(new_line)
         print(f"  Stubbed: {name} -> {stub_body or '(nop)'}", file=sys.stderr)
     else:
