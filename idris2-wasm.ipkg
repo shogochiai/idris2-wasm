@@ -11,6 +11,10 @@ modules = WasmBuilder.WasmBuilder
         , WasmBuilder.IC0.FFI
         , WasmBuilder.IC0.Call
         , WasmBuilder.IC0.Stable
+        , WasmBuilder.SourceMap.VLQ
+        , WasmBuilder.SourceMap.SourceMap
+        , WasmBuilder.SourceMap.VLQTests
+        , WasmBuilder.SourceMap.SourceMapTests
         , WasmBuilder.Tests.AllTests
         , CLI
 

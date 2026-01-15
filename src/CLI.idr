@@ -105,6 +105,7 @@ main = do
                 opts.canisterName
                 opts.mainModule
                 opts.packages
+                True  -- generateSourceMap
           result <- buildCanisterAuto buildOpts
           putStrLn $ show result
           case result of

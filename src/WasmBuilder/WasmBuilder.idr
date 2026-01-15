@@ -11,6 +11,8 @@ import Data.String
 import Data.List
 import System
 import System.File
+import WasmBuilder.SourceMap.SourceMap
+import WasmBuilder.SourceMap.VLQ
 
 %default covering
 
@@ -26,6 +28,7 @@ record BuildOptions where
   canisterName : String    -- Canister name (for output naming)
   mainModule : String      -- Main module path (default: src/Main.idr)
   packages : List String   -- Additional packages (-p flags)
+  generateSourceMap : Bool -- Generate Idris→WASM source map
 
 ||| Default build options
 public export
@@ -35,6 +38,7 @@ defaultBuildOptions = MkBuildOptions
   , canisterName = "canister"
   , mainModule = "src/Main.idr"
   , packages = ["contrib"]
+  , generateSourceMap = True
   }
 
 ||| Build result
@@ -252,6 +256,8 @@ compileToWasm cFile refcSrc miniGmp ic0Support outputWasm = do
             "-s FILESYSTEM=0 " ++
             "-s ERROR_ON_UNDEFINED_SYMBOLS=0 " ++
             "--no-entry " ++
+            "-g " ++
+            "-gsource-map " ++
             "-O2"
 
   (exitCode, _, stderr) <- executeCommand cmd
@@ -284,6 +290,8 @@ compileToWasm cFile refcSrc miniGmp ic0Support outputWasm = do
                 "-s FILESYSTEM=0 " ++
                 "-s ERROR_ON_UNDEFINED_SYMBOLS=0 " ++
                 "--no-entry " ++
+                "-g " ++
+                "-gsource-map " ++
                 "-O2"
 
       (exitCode, _, stderr) <- executeCommand cmd
@@ -381,6 +389,19 @@ buildCanister opts ic0Support = do
   -- Step 4: Stub WASI
   Right () <- stubWasi rawWasm stubbedWasm
     | Left err => pure $ BuildError err
+
+  -- Step 5: Generate Source Maps (if enabled)
+  when opts.generateSourceMap $ do
+    putStrLn "      Step 5: Generating Source Maps"
+    Right cContent <- readFile cFile
+      | Left _ => putStrLn "        Warning: Could not read C file for source map"
+    let idrisCMap = generateIdrisCSourceMapWithFunctions cFile cContent
+    let idrisCMapPath = wasmDir ++ "/idris2-c.map"
+    Right () <- writeSourceMap idrisCMapPath idrisCMap
+      | Left _ => putStrLn "        Warning: Could not write idris2-c.map"
+    putStrLn $ "        Generated: " ++ idrisCMapPath
+    putStrLn $ "        Sources: " ++ show (length idrisCMap.sources) ++ " Idris files"
+    putStrLn $ "        Functions: " ++ show (length idrisCMap.names) ++ " Idris functions"
 
   putStrLn $ "    Build complete: " ++ stubbedWasm
   pure $ BuildSuccess stubbedWasm
