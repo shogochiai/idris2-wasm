@@ -33,7 +33,34 @@ def main():
     lines = content.split('\n')
     output = []
 
+    # Track function index for imports
+    func_idx = 0
+
     for line in lines:
+        # Match WASI imports with named functions: (func $name (type N))
+        m = re.search(r'\(import "wasi_snapshot_preview1" "(\w+)" \(func \$(\w+) \(type (\d+)\)\)\)', line)
+        if m:
+            name, func_name, tid = m.groups()
+            sig = types.get(int(tid), '')
+
+            # Generate stub: return appropriate zero value based on result type
+            if '(result i32)' in sig or sig.endswith('result i32'):
+                ret = 'i32.const 0'
+            elif '(result i64)' in sig:
+                ret = 'i64.const 0'
+            elif '(result f32)' in sig:
+                ret = 'f32.const 0'
+            elif '(result f64)' in sig:
+                ret = 'f64.const 0'
+            else:
+                ret = ''
+
+            # Keep function name for debugging
+            output.append(f'  (func ${func_name} (type {tid}) {sig} {ret})')
+            func_idx += 1
+            continue
+
+        # Match WASI imports with index only: (func (;N;) (type M))
         m = re.search(r'\(import "wasi_snapshot_preview1" "(\w+)" \(func \(;(\d+);\) \(type (\d+)\)\)\)', line)
         if m:
             name, idx, tid = m.groups()
