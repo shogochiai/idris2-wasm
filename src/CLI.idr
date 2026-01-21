@@ -105,7 +105,9 @@ main = do
                 opts.canisterName
                 opts.mainModule
                 opts.packages
-                True  -- generateSourceMap
+                True   -- generateSourceMap
+                False  -- forTestBuild (CLI doesn't use test builds)
+                Nothing -- testModulePath (CLI doesn't use test builds)
           result <- buildCanisterAuto buildOpts
           putStrLn $ show result
           case result of
