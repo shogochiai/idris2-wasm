@@ -156,6 +156,12 @@ public export
 Show ExportedFunc where
   show ef = ef.name ++ " : " ++ ef.returnType ++ " [" ++ (if ef.isQuery then "query" else "update") ++ "]"
 
+||| Convert DidMethod to ExportedFunc for stub generation
+||| Used when building test canisters that need all .did methods as entry points
+public export
+didMethodToExport : DidMethod -> ExportedFunc
+didMethodToExport dm = MkExportedFunc dm.name (show dm.returnType) dm.isQuery
+
 ||| Parse export declarations from Idris source
 ||| Looks for pattern: export\n funcName : Type
 ||| Returns list of exported functions
@@ -833,17 +839,29 @@ generateCanisterEntry opts ic0Support = do
     putStrLn $ "        Parsed .did file: " ++ show (length methods) ++ " methods, " ++ show (length types) ++ " types"
     pure (methods, types)
 
-  if null exports
+  -- For test builds: use .did methods if available (for coverage testing)
+  -- This ensures all canister methods are exported even if Idris doesn't define them
+  let effectiveExports = if opts.forTestBuild && not (null didMethods)
+        then let didExports = map didMethodToExport didMethods
+                 -- Merge: keep Idris exports, add .did methods not already exported
+                 existingNames = map (\e => e.name) exports
+                 newFromDid = filter (\e => not (e.name `elem` existingNames)) didExports
+             in exports ++ newFromDid
+        else exports
+
+  if null effectiveExports
     then do
       -- No exports found, use static canister_entry.c
       pure $ Right (ic0Support ++ "/canister_entry.c")
     else do
       -- Generate dynamic canister_entry.c with Candid-aware stubs
-      let entryC = generateCanisterEntryC exports didMethods typeDefs
+      let entryC = generateCanisterEntryC effectiveExports didMethods typeDefs
       let tempEntryPath = "/tmp/canister_entry_generated.c"
       Right () <- writeFile tempEntryPath entryC
         | Left err => pure $ Left $ "Failed to write canister_entry.c: " ++ show err
-      putStrLn $ "        Generated canister_entry.c with " ++ show (length exports) ++ " entry points"
+      when opts.forTestBuild $
+        putStrLn $ "        Test build: merged " ++ show (length exports) ++ " Idris exports + " ++ show (length didMethods) ++ " .did methods"
+      putStrLn $ "        Generated canister_entry.c with " ++ show (length effectiveExports) ++ " entry points"
       pure $ Right tempEntryPath
 
 ||| Build complete canister WASM from Idris2 source
