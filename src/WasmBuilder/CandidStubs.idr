@@ -340,7 +340,10 @@ parseMethodLine line =
   let trimmed = trim line
   in if null trimmed || isPrefixOf "//" trimmed || isPrefixOf "type " trimmed
        then Nothing
-       else case break (== ':') (unpack trimmed) of
+       -- Methods must have "->" to distinguish from record fields
+       else if not (isInfixOf "->" trimmed)
+         then Nothing
+         else case break (== ':') (unpack trimmed) of
               (namePart, ':' :: rest) =>
                 let methodName = trim (pack namePart)
                     restStr = pack rest
@@ -350,6 +353,24 @@ parseMethodLine line =
                      then Nothing
                      else Just $ MkDidMethod methodName (parseSimpleType returnStr) isQ
               _ => Nothing
+
+||| Extract lines within the service block only
+||| Skips type definitions and extracts only between "service : {" and "}"
+extractServiceBlock : List String -> List String
+extractServiceBlock ls = go ls False
+  where
+    go : List String -> Bool -> List String
+    go [] _ = []
+    go (l :: rest) False =
+      -- Look for "service" line with "{"
+      if isInfixOf "service" l && isInfixOf "{" l
+        then go rest True
+        else go rest False
+    go (l :: rest) True =
+      let trimmed = trim l
+      in if trimmed == "}" || trimmed == "};"
+           then []  -- End of service block
+           else l :: go rest True
 
 ||| Parse .did file content and extract type definitions
 ||| Handles multi-line type definitions
@@ -361,14 +382,13 @@ parseTypeDefinitions content =
   in mapMaybe parseTypeDef joined
 
 ||| Parse .did file content and extract method signatures
+||| Only parses lines within the "service : { ... }" block
 public export
 parseDidFile : String -> List DidMethod
 parseDidFile content =
   let ls = lines content
-      inService = any (isInfixOf "service") ls
-  in if inService
-       then mapMaybe parseMethodLine ls
-       else []
+      serviceLines = extractServiceBlock ls
+  in mapMaybe parseMethodLine serviceLines
 
 -- =============================================================================
 -- Type Resolution

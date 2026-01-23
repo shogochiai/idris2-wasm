@@ -114,7 +114,7 @@ generateTestMainContent testModuleName = unlines
   [ "||| Auto-generated test entry point for coverage analysis"
   , "module Main"
   , ""
-  , "import " ++ testModuleName
+  , "import public " ++ testModuleName  -- Re-export all test module exports
   , ""
   , "%default covering"
   , ""
@@ -151,16 +151,17 @@ record ExportedFunc where
   name : String           -- Function name (e.g., "runTests")
   returnType : String     -- Return type (e.g., "IO (Int, Int)")
   isQuery : Bool          -- True for query, False for update
+  fromDid : Bool          -- True if added from .did (no Idris impl)
 
 public export
 Show ExportedFunc where
-  show ef = ef.name ++ " : " ++ ef.returnType ++ " [" ++ (if ef.isQuery then "query" else "update") ++ "]"
+  show ef = ef.name ++ " : " ++ ef.returnType ++ " [" ++ (if ef.isQuery then "query" else "update") ++ "]" ++ (if ef.fromDid then " (stub)" else "")
 
 ||| Convert DidMethod to ExportedFunc for stub generation
 ||| Used when building test canisters that need all .did methods as entry points
 public export
 didMethodToExport : DidMethod -> ExportedFunc
-didMethodToExport dm = MkExportedFunc dm.name (show dm.returnType) dm.isQuery
+didMethodToExport dm = MkExportedFunc dm.name (show dm.returnType) dm.isQuery True
 
 ||| Parse export declarations from Idris source
 ||| Looks for pattern: export\n funcName : Type
@@ -187,17 +188,15 @@ parseExportedFunctions content =
            _ => Nothing
 
     -- Determine if function is query (no state mutation) or update
-    -- Heuristic: functions whose final return type starts with IO are queries
-    -- Example: "Int -> IO Int" → split by '>' → ["Int -", " IO Int"]
-    --          → last part " IO Int" → trim → "IO Int" → starts with "IO" → query
-    isQueryType : String -> Bool
-    isQueryType fullType =
-      let -- Split by '>' to separate parts of "A -> B -> C" chains
-          -- split returns List1, so last always succeeds
-          parts = split (== '>') fullType
-          -- Get the last part (the final return type)
-          lastPart = last parts  -- List1.last : List1 a -> a
-      in isPrefixOf "IO" (trim lastPart)
+    -- Default to UPDATE for safety. Only mark as query if function name
+    -- suggests read-only operation (getter pattern).
+    isQueryType : String -> String -> Bool
+    isQueryType funcName fullType =
+      let name = toLower funcName
+          -- Common query prefixes - functions that just read data
+          -- Note: "can" removed as it matches "canister*" which are often updates
+          queryPrefixes = ["get", "is", "has", "query", "http_request", "read", "fetch", "list", "find", "check"]
+      in any (\p => isPrefixOf p name) queryPrefixes
 
     parseLines : List String -> List ExportedFunc -> List ExportedFunc
     parseLines [] acc = reverse acc
@@ -206,7 +205,7 @@ parseExportedFunctions content =
       if isExportLine line1
         then case parseTypeSig line2 of
                Just (funcName, retType) =>
-                 let ef = MkExportedFunc funcName retType (isQueryType retType)
+                 let ef = MkExportedFunc funcName retType (isQueryType funcName retType) False
                  in parseLines rest (ef :: acc)
                Nothing => parseLines (line2 :: rest) acc
         else parseLines (line2 :: rest) acc
@@ -225,18 +224,31 @@ generateFuncEntry ef didMethods typeDefs =
   let queryOrUpdate = if ef.isQuery then "query" else "update"
       cFuncName = "Main_" ++ ef.name  -- RefC mangling: Module_function
       replyCode = generateReplyCode ef didMethods typeDefs
+      -- Generate actual function call for profiling (only for real Idris exports)
+      funcCallCode = if ef.fromDid
+                       then "    // .did stub - no Idris function to call"
+                       else generateFuncCall cFuncName ef.returnType
   in unlines
        [ ""
        , "__attribute__((export_name(\"canister_" ++ queryOrUpdate ++ " " ++ ef.name ++ "\")))"
        , "void canister_" ++ queryOrUpdate ++ "_" ++ ef.name ++ "(void) {"
        , "    debug_log(\"" ++ ef.name ++ " called\");"
-       , "    // DEBUG: Skip init to isolate trap"
-       , "    // ensure_idris2_init();"
-       , ""
-       , "    // DEBUG: Skip function call entirely, just reply fixed value"
+       , "    ensure_idris2_init();"
+       , funcCallCode
        , "    " ++ replyCode
        , "}"
        ]
+  where
+    -- Generate code to actually call the Idris function (for profiling)
+    generateFuncCall : String -> String -> String
+    generateFuncCall funcName retType =
+      -- Call the Idris function via trampoline to trigger internal function traces
+      unlines
+        [ "    // Actually call Idris function for profiling"
+        , "    void* _world = idris2_newReference((void*)0);"
+        , "    void* _result = idris2_trampoline(" ++ funcName ++ "(_world));"
+        , "    (void)_result; // TODO: Extract actual return value"
+        ]
   where
     -- Generate Candid reply code based on .did return type if available
     generateReplyCode : ExportedFunc -> List DidMethod -> List TypeDef -> String
@@ -262,7 +274,10 @@ generateCanisterEntryC : List ExportedFunc -> List DidMethod -> List TypeDef -> 
 generateCanisterEntryC exports didMethods typeDefs =
   let funcEntries = fastConcat $ map (\ef => generateFuncEntry ef didMethods typeDefs) exports
       header = canisterEntryHeader
-  in header ++ funcEntries
+      -- Generate extern declarations only for actual Idris functions (not .did stubs)
+      idrisExports = filter (\ef => not ef.fromDid) exports
+      funcExterns = unlines $ map (\ef => "extern void* Main_" ++ ef.name ++ "(void*);") idrisExports
+  in header ++ "\n/* Idris Function Externs */\n" ++ funcExterns ++ "\n" ++ funcEntries
   where
     canisterEntryHeader : String
     canisterEntryHeader = unlines
@@ -293,6 +308,7 @@ generateCanisterEntryC exports didMethods typeDefs =
       , "typedef void* Value;"
       , "extern void* __mainExpression_0(void);"
       , "extern void* idris2_trampoline(void*);"
+      , "extern void* idris2_newReference(void*);"
       , ""
       , "static int idris2_initialized = 0;"
       , ""
@@ -628,6 +644,7 @@ compileToWasm cFile refcSrc miniGmp ic0Support outputWasm = do
             ic0Support ++ "/canister_entry.c " ++
             ic0Support ++ "/wasi_stubs.c " ++
             ic0Support ++ "/ic_ffi_bridge.c " ++
+            ic0Support ++ "/ic_call.c " ++
             includeFlags ++ " " ++
             "-I" ++ miniGmp ++ " " ++
             "-I" ++ refcSrc ++ " " ++
@@ -662,6 +679,7 @@ compileToWasm cFile refcSrc miniGmp ic0Support outputWasm = do
                 ic0Support' ++ "/ic0_stubs.c " ++
                 ic0Support' ++ "/canister_entry.c " ++
                 ic0Support' ++ "/wasi_stubs.c " ++
+                ic0Support' ++ "/ic_call.c " ++
                 includeFlags ++ " " ++
                 "-I" ++ miniGmp' ++ " " ++
                 "-I" ++ refcSrc ++ " " ++
@@ -704,7 +722,14 @@ compileToWasmWithEntry cFile refcSrc miniGmp ic0Support canisterEntryPath output
       | Left _ => pure False
     pure True
 
+  -- Check for ic_call.c
+  hasCall <- do
+    Right _ <- readFile (ic0Support ++ "/ic_call.c")
+      | Left _ => pure False
+    pure True
+
   let bridgeFile = if hasBridge then ic0Support ++ "/ic_ffi_bridge.c " else ""
+  let callFile = if hasCall then ic0Support ++ "/ic_call.c " else ""
 
   let cmd = "CPATH= CPLUS_INCLUDE_PATH= emcc " ++ cFile ++ " " ++
             refcCFiles ++ " " ++
@@ -713,6 +738,7 @@ compileToWasmWithEntry cFile refcSrc miniGmp ic0Support canisterEntryPath output
             canisterEntryPath ++ " " ++  -- Use provided canister_entry.c
             ic0Support ++ "/wasi_stubs.c " ++
             bridgeFile ++
+            callFile ++
             includeFlags ++ " " ++
             "-I" ++ miniGmp ++ " " ++
             "-I" ++ refcSrc ++ " " ++
@@ -809,13 +835,12 @@ generateCanisterEntry opts ic0Support = do
   -- Determine Main.idr content
   mainContent <- if opts.forTestBuild
     then do
-      -- In test mode: combine original Main.idr exports + runTests
+      -- In test mode: ONLY generate runTests export
+      -- DO NOT read original Main.idr - those functions won't be in test WASM
+      -- .did methods will be added later via didMethodToExport (with fromDid = True)
       let testModulePath' = fromMaybe "src/Tests/AllTests.idr" opts.testModulePath
       let testModuleName = pathToModuleName testModulePath'
-      let mainPath = opts.projectDir ++ "/src/Main.idr"
-      Right originalContent <- readFile mainPath
-        | Left _ => pure (generateTestMainContent testModuleName)
-      pure (originalContent ++ "\n" ++ generateTestMainContent testModuleName)
+      pure (generateTestMainContent testModuleName)
     else do
       let mainPath = opts.projectDir ++ "/src/Main.idr"
       Right content <- readFile mainPath
