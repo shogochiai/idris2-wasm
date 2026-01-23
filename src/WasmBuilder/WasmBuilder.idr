@@ -114,7 +114,7 @@ generateTestMainContent testModuleName = unlines
   [ "||| Auto-generated test entry point for coverage analysis"
   , "module Main"
   , ""
-  , "import public " ++ testModuleName  -- Re-export all test module exports
+  , "import " ++ testModuleName  -- Import test module (not public to avoid name clashes)
   , ""
   , "%default covering"
   , ""
@@ -126,14 +126,16 @@ generateTestMainContent testModuleName = unlines
   , "||| Wraps " ++ testModuleName ++ ".runAllTests with IO for canister compatibility"
   , "export"
   , "runTests : IO (Int, Int)"
-  , "runTests = pure " ++ testModuleName ++ ".runAllTests"
+  , "runTests = do"
+  , "  let (passed, failed) = " ++ testModuleName ++ ".runAllTests"
+  , "  pure (cast passed, cast failed)"
   , ""
   , "||| Force code retention to prevent DCE"
   , "forceRetain : IO ()"
   , "forceRetain = do"
   , "  v <- primIO $ prim__ic_ffi_get_arg 7"
   , "  when (v == (-999999)) $ do"
-  , "    _ <- runTests"
+  , "    _ <- Main.runTests"  -- Explicit to avoid clash with Tests.AllTests.runTests
   , "    pure ()"
   , ""
   , "main : IO ()"
@@ -216,13 +218,14 @@ parseExportedFunctions content =
 
 ||| Generate C code for a single exported function
 ||| Creates IC canister_query/canister_update entry point
+||| @modulePrefix C function prefix (e.g., "Main" or "Tests_AllTests")
 ||| @ef Exported function info from Idris
 ||| @didMethods Parsed .did methods for Candid-aware reply generation
 ||| @typeDefs Parsed .did type definitions for dynamic Candid encoding
-generateFuncEntry : ExportedFunc -> List DidMethod -> List TypeDef -> String
-generateFuncEntry ef didMethods typeDefs =
+generateFuncEntry : String -> ExportedFunc -> List DidMethod -> List TypeDef -> String
+generateFuncEntry modulePrefix ef didMethods typeDefs =
   let queryOrUpdate = if ef.isQuery then "query" else "update"
-      cFuncName = "Main_" ++ ef.name  -- RefC mangling: Module_function
+      cFuncName = modulePrefix ++ "_" ++ ef.name  -- RefC mangling: Module_function
       replyCode = generateReplyCode ef didMethods typeDefs
       -- Generate actual function call for profiling (only for real Idris exports)
       funcCallCode = if ef.fromDid
@@ -267,16 +270,17 @@ generateFuncEntry ef didMethods typeDefs =
               else "reply_text(\"done\"); // Generic result (no .did match)"
 
 ||| Generate complete canister_entry.c with all exported functions
+||| @modulePrefix C function prefix (e.g., "Main" or "Tests_AllTests")
 ||| @exports List of exported functions from Idris
 ||| @didMethods Parsed .did methods for Candid-aware reply generation
 ||| @typeDefs Parsed .did type definitions for dynamic Candid encoding
-generateCanisterEntryC : List ExportedFunc -> List DidMethod -> List TypeDef -> String
-generateCanisterEntryC exports didMethods typeDefs =
-  let funcEntries = fastConcat $ map (\ef => generateFuncEntry ef didMethods typeDefs) exports
+generateCanisterEntryC : String -> List ExportedFunc -> List DidMethod -> List TypeDef -> String
+generateCanisterEntryC modulePrefix exports didMethods typeDefs =
+  let funcEntries = fastConcat $ map (\ef => generateFuncEntry modulePrefix ef didMethods typeDefs) exports
       header = canisterEntryHeader
       -- Generate extern declarations only for actual Idris functions (not .did stubs)
       idrisExports = filter (\ef => not ef.fromDid) exports
-      funcExterns = unlines $ map (\ef => "extern void* Main_" ++ ef.name ++ "(void*);") idrisExports
+      funcExterns = unlines $ map (\ef => "extern void* " ++ modulePrefix ++ "_" ++ ef.name ++ "(void*);") idrisExports
   in header ++ "\n/* Idris Function Externs */\n" ++ funcExterns ++ "\n" ++ funcEntries
   where
     canisterEntryHeader : String
@@ -444,10 +448,14 @@ generateTestIpkg originalIpkg projectDir tempSrcDir = do
 ||| @customTestPath - Optional custom test module path (relative to projectDir, e.g., "src/Economics/Tests/AllTests.idr")
 setupTestBuild : String -> String -> Maybe String -> IO (Either String String)
 setupTestBuild projectDir originalIpkg customTestPath = do
+  -- Convert projectDir to absolute path (needed for symlinks to work from temp dir)
+  (_, absProjectDir', _) <- executeCommand $ "cd " ++ projectDir ++ " && pwd"
+  let absProjectDir = trim absProjectDir'
+
   -- Check test module exists (fail fast)
   let testModulePath = case customTestPath of
-        Just p  => projectDir ++ "/" ++ p
-        Nothing => projectDir ++ "/src/Tests/AllTests.idr"
+        Just p  => absProjectDir ++ "/" ++ p
+        Nothing => absProjectDir ++ "/src/Tests/AllTests.idr"
   let testModuleRelPath = fromMaybe "src/Tests/AllTests.idr" customTestPath
   Right _ <- readFile testModulePath
     | Left _ => pure (Left $ "Test module not found: " ++ testModuleRelPath ++ "\nCreate this file with: export runAllTests : (Int, Int)")
@@ -459,9 +467,10 @@ setupTestBuild projectDir originalIpkg customTestPath = do
 
   -- Create symlinks to all src/ items EXCEPT Main.idr
   -- This allows `import Tests.AllTests` to work while using our generated Main
-  (_, files, _) <- executeCommand $ "ls " ++ projectDir ++ "/src/"
+  -- Uses absolute paths so symlinks work from any location
+  (_, files, _) <- executeCommand $ "ls " ++ absProjectDir ++ "/src/"
   let srcItems = filter (\s => not (null s) && s /= "Main.idr") (lines files)
-  _ <- traverse_ (\item => system $ "ln -sf " ++ projectDir ++ "/src/" ++ item ++ " " ++ tempSrcDir ++ "/" ++ item) srcItems
+  _ <- traverse_ (\item => system $ "ln -sf " ++ absProjectDir ++ "/src/" ++ item ++ " " ++ tempSrcDir ++ "/" ++ item) srcItems
 
   -- Write generated Main.idr to temp (not a symlink, actual generated file)
   let tempMainPath = tempSrcDir ++ "/Main.idr"
@@ -470,7 +479,7 @@ setupTestBuild projectDir originalIpkg customTestPath = do
     | Left err => pure (Left $ "Failed to write temp Main: " ++ show err)
 
   -- Generate temp ipkg pointing to temp src directory
-  Right tempIpkg <- generateTestIpkg originalIpkg projectDir tempSrcDir
+  Right tempIpkg <- generateTestIpkg originalIpkg absProjectDir tempSrcDir
     | Left err => pure (Left err)
 
   pure (Right tempIpkg)
@@ -502,8 +511,22 @@ compileToRefC opts buildDir = do
       compileWithIpkg opts tempIpkg
     else compileWithIpkg opts ipkgFile
   where
+    -- Extract directory from a file path
+    dirname : String -> String
+    dirname path =
+      let chars = unpack (reverse path)
+          (_, rest) = break (== '/') chars
+      in pack (reverse (drop 1 rest))
+
     compileWithIpkg : BuildOptions -> String -> IO (Either String String)
     compileWithIpkg opts' ipkg = do
+      -- For test builds, ipkg is in temp dir (e.g., /tmp/idris2-wasm-test-xxx/test_build.ipkg)
+      -- Build output goes to that directory's build/ folder
+      let ipkgDir = dirname ipkg
+      let buildSearchDir = if ipkgDir /= opts'.projectDir && not (null ipkgDir)
+            then ipkgDir ++ "/build"
+            else opts'.projectDir ++ "/build"
+
       let cmd = "cd " ++ opts'.projectDir ++ " && " ++
                 "idris2 --codegen refc --build " ++ ipkg
 
@@ -511,8 +534,8 @@ compileToRefC opts buildDir = do
       -- We ignore the exit code and just check if C file was generated
       _ <- executeCommand cmd
 
-      -- Find generated C file in project's build directory
-      let findCmd = "sh -c 'find " ++ opts'.projectDir ++ "/build -name \"*.c\" 2>/dev/null | head -1'"
+      -- Find generated C file in build directory
+      let findCmd = "sh -c 'find " ++ buildSearchDir ++ " -name \"*.c\" 2>/dev/null | head -1'"
       (_, cFile, _) <- executeCommand findCmd
       if null (trim cFile)
         then pure $ Left "No C file generated by RefC"
@@ -878,13 +901,17 @@ generateCanisterEntry opts ic0Support = do
              in exports ++ newFromDid
         else exports
 
+  -- Determine module prefix: "Main" for both prod and test builds
+  -- (test builds generate a temp Main.idr that re-exports from Tests.AllTests)
+  let modulePrefix = "Main"
+
   if null effectiveExports
     then do
       -- No exports found, use static canister_entry.c
       pure $ Right (ic0Support ++ "/canister_entry.c")
     else do
       -- Generate dynamic canister_entry.c with Candid-aware stubs
-      let entryC = generateCanisterEntryC effectiveExports didMethods typeDefs
+      let entryC = generateCanisterEntryC modulePrefix effectiveExports didMethods typeDefs
       let tempEntryPath = "/tmp/canister_entry_generated.c"
       Right () <- writeFile tempEntryPath entryC
         | Left err => pure $ Left $ "Failed to write canister_entry.c: " ++ show err
