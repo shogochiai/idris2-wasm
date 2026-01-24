@@ -18,6 +18,55 @@ idris2 --codegen refc -o main.c Main.idr
 emcc main.c -o main.wasm
 ```
 
+## Candid→C Code Generation (CandidStubs)
+
+**canister_entry.c の自動生成機能**
+
+`WasmBuilder/CandidStubs.idr` (596行) は .did ファイルから C コードを生成:
+
+| 機能 | 状態 | 説明 |
+|------|------|------|
+| .did パーサー | ✅ 実装済 | 20+ Candid型をサポート (Nat, Int, Text, Bool, Record, Variant等) |
+| 型テーブル生成 | ✅ 実装済 | LEB128エンコード + フィールドハッシュ |
+| レスポンスエンコード | ✅ 実装済 | DIDL binary format 生成 |
+| **引数デコード** | ❌ 未実装 | Candid→C引数パース (Gap) |
+
+### 使用方法
+
+```idris
+import WasmBuilder.WasmBuilder
+import WasmBuilder.CandidStubs
+
+-- can.did から canister_entry.c を生成
+generateCanisterEntryC : String -> String -> IO ()
+```
+
+### 生成される C コード例
+
+```c
+__attribute__((export_name("canister_query getVersion")))
+void canister_query_getVersion(void) {
+    // Candid binary reply (DIDL + type table + value)
+    static const uint8_t r[] = {
+        'D','I','D','L',  // magic
+        0x00,             // empty type table
+        0x01, 0x7D,       // 1 return value, type: nat
+        0x01              // value: 1
+    };
+    ic0_msg_reply_data_append((int32_t)(uintptr_t)r, sizeof(r));
+    ic0_msg_reply();
+}
+```
+
+### 利用側プロジェクトへの指示
+
+**原則:** `can.did` を単一真実源とし、`canister_entry.c` は生成物として扱う
+
+手動で `canister_entry.c` を書いている場合 (idris2-ouc 等):
+1. それは tech debt
+2. 将来的に CandidStubs の引数デコード実装後、自動生成に移行すべき
+3. 現時点では `can.did` に追加したメソッドは手動で C に追加が必要
+
 ## Source Map Generation
 
 ビルド時に `build/idris2-c.map` を生成。C行番号→Idrisソースファイル/関数名のマッピング。
